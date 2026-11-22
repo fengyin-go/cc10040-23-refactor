@@ -29,3 +29,11 @@ class EntryPayload(BaseModel):
 class ActionPayload(BaseModel):
     action: str
     remark: str | None = None
+
+
+class PublishBundlePayload(BaseModel):
+    """维度模型与配套透视配置的成组发布请求。"""
+
+    model_values: dict[str, Any] = Field(default_factory=dict)
+    pivot_configs: list[dict[str, Any]] = Field(default_factory=list)
+    expected_revision: int | None = None

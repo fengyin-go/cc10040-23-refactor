@@ -8,6 +8,8 @@ from __future__ import annotations
 
 from fastapi import APIRouter
 
+from app.schemas import PublishBundlePayload
+from app.store import store
 from app.services.metric_definition import MetricDefinitionService
 from app.services.caliber_version import CaliberVersionService
 from app.services.query_builder import QueryBuilderService
@@ -124,47 +126,71 @@ def performance_insights():
 
 
 # ── 链2: 维度分析下钻链 ──
+# 同一请求内的多次跨模块读取共享一套读取基准；写入口自行在基准外落库。
+# 外层基准与各服务内部的基准嵌套复用，因此一个请求始终只见到一套相容的值。
+
+def _read_with_basis(call, *args):
+    with store.read_basis():
+        return call(*args)
+
 
 @router.get("/dimension-model/{model_id}/with-analytics")
 def get_dimension_model_with_analytics(model_id: int):
     """获取维度模型及其关联分析配置"""
     svc = DimensionModelService()
-    return svc.get_model_with_analytics(model_id)
+    return _read_with_basis(svc.get_model_with_analytics, model_id)
 
 
 @router.get("/dimension-model/{model_id}/hierarchy")
 def get_dimension_hierarchy(model_id: int):
     """获取维度层次结构"""
     svc = DimensionModelService()
-    return svc.get_dimension_hierarchy(model_id)
+    return _read_with_basis(svc.get_dimension_hierarchy, model_id)
+
+
+@router.post("/dimension-model/{model_id}/publish-with-pivots")
+def publish_dimension_model_with_pivots(model_id: int, payload: PublishBundlePayload):
+    """成组发布维度模型与配套透视配置（可选乐观版本校验）"""
+    svc = DimensionModelService()
+    return svc.publish_with_pivots(
+        model_id, payload.pivot_configs,
+        model_values=payload.model_values or None,
+        expected_revision=payload.expected_revision)
 
 
 @router.post("/drill-down/{path_id}/execute")
 def execute_drill_down(path_id: int, current_level: int = 0):
     """执行下钻分析"""
     svc = DrillDownService()
-    return svc.execute_drill_down(path_id, current_level)
+    return _read_with_basis(svc.execute_drill_down, path_id, current_level)
 
 
 @router.get("/drill-down/{path_id}/tree")
 def get_drill_tree(path_id: int):
     """获取下钻路径树"""
     svc = DrillDownService()
-    return svc.get_drill_tree(path_id)
+    return _read_with_basis(svc.get_drill_tree, path_id)
 
 
 @router.get("/drill-down/{path_id}/export-to-pivot")
 def export_drill_to_pivot(path_id: int):
     """将下钻路径导出为透视表配置建议"""
     svc = DrillDownService()
-    return svc.export_to_pivot(path_id)
+    return _read_with_basis(svc.export_to_pivot, path_id)
+
+
+@router.post("/drill-down/{path_id}/register-pivot")
+def register_drill_pivot(path_id: int):
+    """按下钻导出建议登记透视配置并立即聚合"""
+    svc = DrillDownService()
+    return svc.export_and_register_pivot(path_id)
 
 
 @router.post("/pivot-table/{config_id}/compute")
 def compute_pivot(config_id: int):
     """计算透视表"""
     svc = PivotTableService()
-    return svc.compute_pivot(config_id)
+    return _read_with_basis(svc.compute_pivot, config_id)
 
 
 @router.post("/pivot-table/{config_id}/share-to-report")

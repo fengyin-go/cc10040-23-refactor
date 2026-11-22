@@ -9,6 +9,7 @@ from typing import Any
 
 from app.store import store
 from app.services.base import BaseModuleService
+from app.services.dimensions import read_available_dimensions
 
 
 class PivotTableService(BaseModuleService):
@@ -26,22 +27,23 @@ class PivotTableService(BaseModuleService):
 
         跨模块数据流: dimension_model -> drill_down -> pivot_table
         """
+        with store.read_basis():
+            return self._compute_pivot(entry_id)
+
+    def _compute_pivot(self, entry_id: int) -> dict[str, Any] | None:
         config = store.find(self.MODULE, entry_id)
         if config is None:
             return {"error": f"透视配置 {entry_id} 不存在"}
+        store.notify_entry_read(self.MODULE, config)
 
         metric = config.get("数据源指标", "")
+        # 实际取数轴始终来自配置本身，保持配置登记时的行列顺序。
         row_dim = config.get("行维度", "")
         col_dim = config.get("列维度", "")
         agg_method = config.get("聚合方式", "COUNT")
 
-        # 查找关联维度模型
-        dim_models = store.find_by_field("dimension_model", "模型名称", metric)
-        dimensions_available = []
-        if dim_models:
-            dimensions_available = [
-                d.strip() for d in dim_models[0].get("维度列表", "").split(",") if d.strip()
-            ]
+        # 可用维度来自共用的模型读取，与层级、下钻口径一致。
+        dimensions_available = read_available_dimensions(store, metric)
 
         # 模拟透视表计算
         row_values = [f"{row_dim}_{i+1}" for i in range(3)]
@@ -79,6 +81,20 @@ class PivotTableService(BaseModuleService):
 
         跨模块数据流: pivot_table -> report_template
         """
+        # 读取与聚合在同一套基准内完成；写回真实仓库放在基准之外，
+        # 避免把共享结果写进只读副本。
+        with store.read_basis():
+            result = self._share_to_report(entry_id, report_template_id)
+            snapshot_report = store.find("report_template", report_template_id)
+            pivot_result = snapshot_report.get("透视表结果") if snapshot_report else None
+
+        if "error" not in result and pivot_result is not None:
+            report = store.find("report_template", report_template_id)
+            if report is not None:
+                report["透视表结果"] = pivot_result
+        return result
+
+    def _share_to_report(self, entry_id: int, report_template_id: int) -> dict[str, Any]:
         config = store.find(self.MODULE, entry_id)
         if config is None:
             return {"error": f"透视配置 {entry_id} 不存在"}
@@ -88,7 +104,7 @@ class PivotTableService(BaseModuleService):
             return {"error": f"报告模板 {report_template_id} 不存在"}
 
         # 计算透视结果
-        pivot_result = self.compute_pivot(entry_id)
+        pivot_result = self._compute_pivot(entry_id)
         if "error" in pivot_result:
             return pivot_result
 
